@@ -10,11 +10,11 @@ WS_URL = "wss://pumpportal.fun/api/data"
 
 stats = {"win": 0, "loss": 0}
 sol_price_usd = {"price": 130.0, "updated": 0}
-whale_alerted = {}  # mint -> set of tx signatures already alerted
 
-MC_MIN_USD = 3_000
-MC_MAX_USD = 200_000
-WHALE_MIN_SOL = 2.0  # alert if single buy >= this
+MC_ALERT_USD = 10_000   # Alert when MC hits this
+MC_MAX_USD = 200_000    # Ignore if already too high
+WHALE_MIN_SOL = 2.0
+MONITOR_WAIT_MIN = 10   # Minutes to wait for MC to reach target before giving up
 
 def get_sol_price():
     now = time.time()
@@ -68,184 +68,174 @@ def fetch_metadata(uri):
     except:
         return {}
 
-def monitor_token_price(mint, initial_mcap, name, symbol):
-    deadline = time.time() + 1800
-    whale_alerted[mint] = set()
-
-    def on_msg(ws, message):
-        try:
-            data = json.loads(message)
-            mcap = data.get("marketCapSol", 0)
-            tx_type = data.get("txType", "")
-            sig = data.get("signature", "")
-
-            # Whale buy detection
-            if tx_type == "buy":
-                sol_amt = data.get("solAmount", 0)
-                if isinstance(sol_amt, (int, float)):
-                    sol = sol_amt / 1e9 if sol_amt > 1000 else sol_amt
-                    if sol >= WHALE_MIN_SOL and sig not in whale_alerted.get(mint, set()):
-                        whale_alerted[mint].add(sig)
-                        wallet = data.get("traderPublicKey", "???")
-                        wallet_short = wallet[:6]+"..."+wallet[-4:] if len(wallet) > 10 else wallet
-                        current_mcap = fmt_usd(mcap) if mcap else "?"
-                        send_tele("🐋 <b>WHALE BUY DETECTED!</b>\n"
-                                  "Token: <b>"+name+"</b> ($"+symbol+")\n"
-                                  "━━━━━━━━━━━━━━\n"
-                                  "💰 Buy: <b>"+str(round(sol, 2))+" SOL</b> ("+fmt_usd(sol)+")\n"
-                                  "📊 MC Sekarang: "+current_mcap+"\n"
-                                  "👛 Wallet: "+wallet_short+"\n"
-                                  "🔗 pump.fun/"+mint)
-
-            # TP/SL monitoring
-            if mcap <= 0:
-                return
-            if mcap >= initial_mcap * 2:
-                stats["win"] += 1
-                send_tele("✅ <b>PUMP! 2x HIT!</b>\n"
-                          "Token: <b>"+name+"</b> ($"+symbol+")\n"
-                          "MC Awal: "+fmt_usd(initial_mcap)+"\n"
-                          "MC Sekarang: "+fmt_usd(mcap)+"\n\n"
-                          "📊 Win Rate: "+get_winrate())
-                ws.close()
-            elif mcap <= initial_mcap * 0.5:
-                stats["loss"] += 1
-                send_tele("❌ <b>DUMP! -50% HIT!</b>\n"
-                          "Token: <b>"+name+"</b> ($"+symbol+")\n"
-                          "MC Awal: "+fmt_usd(initial_mcap)+"\n"
-                          "MC Sekarang: "+fmt_usd(mcap)+"\n\n"
-                          "📊 Win Rate: "+get_winrate())
-                ws.close()
-            elif time.time() > deadline:
-                ws.close()
-        except:
-            pass
-
-    def on_open_monitor(ws):
-        ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [mint]}))
-
-    def run():
-        try:
-            ws = websocket.WebSocketApp(WS_URL, on_message=on_msg, on_open=on_open_monitor)
-            ws.run_forever()
-        except:
-            pass
-
-    threading.Thread(target=run, daemon=True).start()
-
-def analyze_token(data):
+def watch_token(data):
     try:
         name = data.get("name", "Unknown")
         symbol = data.get("symbol", "???")
         mint = data.get("mint", "")
         uri = data.get("uri", "")
-        initial_mcap = data.get("marketCapSol", 0)
 
         sol_p = get_sol_price()
-        mcap_usd_val = initial_mcap * sol_p
-        if mcap_usd_val < MC_MIN_USD or mcap_usd_val > MC_MAX_USD:
-            return
+        mc_alert_sol = MC_ALERT_USD / sol_p
+        mc_max_sol = MC_MAX_USD / sol_p
 
-        meta = fetch_metadata(uri)
-        twitter = meta.get("twitter") or data.get("twitter") or ""
-        telegram = meta.get("telegram") or data.get("telegram") or ""
-        website = meta.get("website") or data.get("website") or ""
-        description = meta.get("description") or data.get("description") or ""
+        alerted = {"sent": False}
+        whale_sigs = set()
+        deadline = time.time() + (MONITOR_WAIT_MIN * 60)
 
-        sol_amount = data.get("solAmount", 0)
-        if isinstance(sol_amount, (int, float)):
-            sol = sol_amount / 1e9 if sol_amount > 1000 else sol_amount
-        else:
-            sol = 0
+        def on_msg(ws, message):
+            try:
+                data_trade = json.loads(message)
+                mcap = data_trade.get("marketCapSol", 0)
+                tx_type = data_trade.get("txType", "")
+                sig = data_trade.get("signature", "")
 
-        rug_score = 0
-        if not twitter: rug_score += 15
-        if not telegram: rug_score += 10
-        if not website: rug_score += 5
-        if not description or len(description) < 10: rug_score += 10
-        if sol > 10: rug_score += 40
-        elif sol > 5: rug_score += 25
-        elif sol > 2: rug_score += 15
-        elif sol > 0.5: rug_score += 5
-        rug_score = min(rug_score, 100)
-        safe_score = 100 - rug_score
+                if mcap <= 0:
+                    return
 
-        if safe_score >= 70:
-            risk_emoji = "🟢"
-            risk_label = "LOW RISK"
-        elif safe_score >= 50:
-            risk_emoji = "🟡"
-            risk_label = "MEDIUM RISK"
-        else:
-            risk_emoji = "🔴"
-            risk_label = "HIGH RISK"
+                # Skip if already too high
+                if mcap > mc_max_sol:
+                    ws.close()
+                    return
 
-        has_twitter = "✅ "+twitter if twitter else "❌"
-        has_telegram = "✅ "+telegram if telegram else "❌"
-        has_website = "✅ "+website if website else "❌"
-        desc_short = description[:80]+"..." if len(description) > 80 else (description or "-")
-        sol_display = str(round(sol, 4)) if sol > 0 else "0"
-        mcap_usd = fmt_usd(initial_mcap)
-        mcap_sol = str(round(initial_mcap, 2)) if initial_mcap else "?"
+                # Timeout — no movement
+                if time.time() > deadline and not alerted["sent"]:
+                    ws.close()
+                    return
 
-        msg = ("🚀 <b>NEW TOKEN DETECTED!</b>\n"
-               "━━━━━━━━━━━━━━\n"
-               "📌 <b>"+name+"</b> ($"+symbol+")\n"
-               "━━━━━━━━━━━━━━\n"
-               +risk_emoji+" <b>Safe Score: "+str(safe_score)+"/100</b> — "+risk_label+"\n"
-               "━━━━━━━━━━━━━━\n"
-               "🐦 Twitter: "+has_twitter+"\n"
-               "💬 Telegram: "+has_telegram+"\n"
-               "🌐 Website: "+has_website+"\n"
-               "📝 "+desc_short+"\n"
-               "━━━━━━━━━━━━━━\n"
-               "💰 Dev Buy: "+sol_display+" SOL\n"
-               "📊 Market Cap: <b>"+mcap_usd+"</b> ("+mcap_sol+" SOL)\n"
-               "🔗 pump.fun/"+mint+"\n"
-               "━━━━━━━━━━━━━━\n"
-               "📈 Win Rate: "+get_winrate()+"\n"
-               "🐋 Whale alert aktif (≥"+str(WHALE_MIN_SOL)+" SOL)\n"
-               "⏱ Monitoring 30 menit...")
-        send_tele(msg)
+                # First alert when MC hits $10K
+                if not alerted["sent"] and mcap >= mc_alert_sol:
+                    alerted["sent"] = True
+                    alerted["entry_mcap"] = mcap
 
-        if mint and initial_mcap > 0:
-            threading.Thread(target=monitor_token_price, args=(mint, initial_mcap, name, symbol), daemon=True).start()
+                    meta = fetch_metadata(uri)
+                    twitter = meta.get("twitter") or ""
+                    telegram = meta.get("telegram") or ""
+                    website = meta.get("website") or ""
+                    description = meta.get("description") or ""
+
+                    rug_score = 0
+                    if not twitter: rug_score += 15
+                    if not telegram: rug_score += 10
+                    if not website: rug_score += 5
+                    if not description or len(description) < 10: rug_score += 10
+                    rug_score = min(rug_score, 100)
+                    safe_score = 100 - rug_score
+
+                    if safe_score >= 70:
+                        risk_emoji = "🟢"
+                        risk_label = "LOW RISK"
+                    elif safe_score >= 50:
+                        risk_emoji = "🟡"
+                        risk_label = "MEDIUM RISK"
+                    else:
+                        risk_emoji = "🔴"
+                        risk_label = "HIGH RISK"
+
+                    has_twitter = "✅ "+twitter if twitter else "❌"
+                    has_telegram = "✅ "+telegram if telegram else "❌"
+                    has_website = "✅ "+website if website else "❌"
+                    desc_short = description[:80]+"..." if len(description) > 80 else (description or "-")
+
+                    send_tele("🚀 <b>TOKEN AKTIF! MC "+fmt_usd(mcap)+"</b>\n"
+                              "━━━━━━━━━━━━━━\n"
+                              "📌 <b>"+name+"</b> ($"+symbol+")\n"
+                              "━━━━━━━━━━━━━━\n"
+                              +risk_emoji+" <b>Safe Score: "+str(safe_score)+"/100</b> — "+risk_label+"\n"
+                              "━━━━━━━━━━━━━━\n"
+                              "🐦 Twitter: "+has_twitter+"\n"
+                              "💬 Telegram: "+has_telegram+"\n"
+                              "🌐 Website: "+has_website+"\n"
+                              "📝 "+desc_short+"\n"
+                              "━━━━━━━━━━━━━━\n"
+                              "📊 Market Cap: <b>"+fmt_usd(mcap)+"</b>\n"
+                              "🔗 pump.fun/"+mint+"\n"
+                              "━━━━━━━━━━━━━━\n"
+                              "📈 Win Rate: "+get_winrate()+"\n"
+                              "🐋 Whale alert aktif (≥"+str(WHALE_MIN_SOL)+" SOL)\n"
+                              "⏱ Monitoring TP 2x / SL -50%...")
+
+                # Whale detection (after alert sent)
+                if alerted["sent"] and tx_type == "buy" and sig not in whale_sigs:
+                    sol_amt = data_trade.get("solAmount", 0)
+                    if isinstance(sol_amt, (int, float)):
+                        sol = sol_amt / 1e9 if sol_amt > 1000 else sol_amt
+                        if sol >= WHALE_MIN_SOL:
+                            whale_sigs.add(sig)
+                            wallet = data_trade.get("traderPublicKey", "???")
+                            wallet_short = wallet[:6]+"..."+wallet[-4:] if len(wallet) > 10 else wallet
+                            send_tele("🐋 <b>WHALE BUY!</b>\n"
+                                      "Token: <b>"+name+"</b> ($"+symbol+")\n"
+                                      "💰 Buy: <b>"+str(round(sol, 2))+" SOL</b> ("+fmt_usd(sol)+")\n"
+                                      "📊 MC: "+fmt_usd(mcap)+"\n"
+                                      "👛 "+wallet_short+"\n"
+                                      "🔗 pump.fun/"+mint)
+
+                # TP/SL after alert
+                if alerted["sent"]:
+                    entry = alerted.get("entry_mcap", mcap)
+                    if mcap >= entry * 2:
+                        stats["win"] += 1
+                        send_tele("✅ <b>PUMP! 2x HIT!</b>\n"
+                                  "Token: <b>"+name+"</b> ($"+symbol+")\n"
+                                  "MC Entry: "+fmt_usd(entry)+"\n"
+                                  "MC Sekarang: "+fmt_usd(mcap)+"\n\n"
+                                  "📊 Win Rate: "+get_winrate())
+                        ws.close()
+                    elif mcap <= entry * 0.5:
+                        stats["loss"] += 1
+                        send_tele("❌ <b>DUMP! -50% HIT!</b>\n"
+                                  "Token: <b>"+name+"</b> ($"+symbol+")\n"
+                                  "MC Entry: "+fmt_usd(entry)+"\n"
+                                  "MC Sekarang: "+fmt_usd(mcap)+"\n\n"
+                                  "📊 Win Rate: "+get_winrate())
+                        ws.close()
+
+            except:
+                pass
+
+        def on_open_w(ws):
+            ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [mint]}))
+
+        def run():
+            try:
+                ws = websocket.WebSocketApp(WS_URL, on_message=on_msg, on_open=on_open_w)
+                ws.run_forever()
+            except:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     except Exception as e:
-        print("analyze error:", str(e))
+        print("watch error:", str(e))
 
 def on_message(ws, message):
     try:
         data = json.loads(message)
         if data.get("txType") == "create":
-            threading.Thread(target=analyze_token, args=(data,), daemon=True).start()
+            threading.Thread(target=watch_token, args=(data,), daemon=True).start()
     except:
         pass
 
 def on_open(ws):
-    print("WS connected, subscribing...")
+    print("WS connected")
     ws.send(json.dumps({"method": "subscribeNewToken"}))
     send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\n"
-              "Filter MC: <b>$3K - $200K</b>\n"
-              "🐋 Whale alert: buy ≥ 2 SOL\n"
-              "✅ Win/Loss tracking (TP: 2x | SL: -50%)")
+              "Alert saat MC nyentuh: <b>$10K+</b>\n"
+              "Max MC: <b>$200K</b>\n"
+              "🐋 Whale alert: ≥ 2 SOL\n"
+              "✅ TP: 2x | SL: -50%")
 
 def on_error(ws, error):
     print("WS error:", str(error))
 
-def on_close(ws, close_status_code, close_msg):
+def on_close(ws, *args):
     print("WS closed, reconnecting...")
 
 def run_scanner():
     while True:
         try:
-            ws = websocket.WebSocketApp(
-                WS_URL,
-                on_message=on_message,
-                on_open=on_open,
-                on_error=on_error,
-                on_close=on_close
-            )
+            ws = websocket.WebSocketApp(WS_URL, on_message=on_message, on_open=on_open, on_error=on_error, on_close=on_close)
             ws.run_forever(ping_interval=30, ping_timeout=10)
         except Exception as e:
             print("Scanner error:", str(e))
@@ -257,4 +247,4 @@ threading.Thread(target=run_scanner, daemon=True).start()
 def home():
     wr = get_winrate()
     total = stats["win"] + stats["loss"]
-    return "PumpFun Scanner | MC: $3K-$200K | Signals: "+str(total)+" | Win Rate: "+wr, 200
+    return "PumpFun Scanner | Alert at $10K+ | Signals: "+str(total)+" | Win Rate: "+wr, 200
