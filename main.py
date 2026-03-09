@@ -9,7 +9,33 @@ CHAT_ID = "1603606771"
 WS_URL = "wss://pumpportal.fun/api/data"
 
 stats = {"win": 0, "loss": 0}
-monitored_tokens = {}  # mint -> {"initial_mcap": x, "deadline": t, "name": n, "symbol": s}
+sol_price_usd = {"price": 130.0, "updated": 0}
+
+def get_sol_price():
+    now = time.time()
+    if now - sol_price_usd["updated"] < 60:
+        return sol_price_usd["price"]
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", timeout=5)
+        price = r.json()["solana"]["usd"]
+        sol_price_usd["price"] = price
+        sol_price_usd["updated"] = now
+        return price
+    except:
+        return sol_price_usd["price"]
+
+def fmt_usd(sol_amount):
+    try:
+        price = get_sol_price()
+        usd = sol_amount * price
+        if usd >= 1_000_000:
+            return "$"+str(round(usd/1_000_000, 2))+"M"
+        elif usd >= 1_000:
+            return "$"+str(round(usd/1_000, 1))+"K"
+        else:
+            return "$"+str(round(usd, 0))
+    except:
+        return "?"
 
 def send_tele(msg):
     try:
@@ -38,11 +64,9 @@ def fetch_metadata(uri):
         return {}
 
 def monitor_token_price(mint, initial_mcap, name, symbol):
-    deadline = time.time() + 1800  # 30 minutes
-    ws_monitor = None
+    deadline = time.time() + 1800
 
     def on_msg(ws, message):
-        nonlocal deadline
         try:
             data = json.loads(message)
             mcap = data.get("marketCapSol", 0)
@@ -52,16 +76,16 @@ def monitor_token_price(mint, initial_mcap, name, symbol):
                 stats["win"] += 1
                 send_tele("✅ <b>PUMP! 2x HIT!</b>\n"
                           "Token: <b>"+name+"</b> ($"+symbol+")\n"
-                          "MC Awal: "+str(round(initial_mcap,2))+" SOL\n"
-                          "MC Sekarang: "+str(round(mcap,2))+" SOL\n\n"
+                          "MC Awal: "+fmt_usd(initial_mcap)+"\n"
+                          "MC Sekarang: "+fmt_usd(mcap)+"\n\n"
                           "📊 Win Rate: "+get_winrate())
                 ws.close()
             elif mcap <= initial_mcap * 0.5:
                 stats["loss"] += 1
                 send_tele("❌ <b>DUMP! -50% HIT!</b>\n"
                           "Token: <b>"+name+"</b> ($"+symbol+")\n"
-                          "MC Awal: "+str(round(initial_mcap,2))+" SOL\n"
-                          "MC Sekarang: "+str(round(mcap,2))+" SOL\n\n"
+                          "MC Awal: "+fmt_usd(initial_mcap)+"\n"
+                          "MC Sekarang: "+fmt_usd(mcap)+"\n\n"
                           "📊 Win Rate: "+get_winrate())
                 ws.close()
             elif time.time() > deadline:
@@ -128,7 +152,8 @@ def analyze_token(data):
         has_website = "✅ "+website if website else "❌"
         desc_short = description[:80]+"..." if len(description) > 80 else (description or "-")
         sol_display = str(round(sol, 4)) if sol > 0 else "0"
-        mcap_display = str(round(initial_mcap, 2)) if initial_mcap else "?"
+        mcap_usd = fmt_usd(initial_mcap) if initial_mcap else "?"
+        mcap_sol = str(round(initial_mcap, 2)) if initial_mcap else "?"
 
         msg = ("🚀 <b>NEW TOKEN DETECTED!</b>\n"
                "━━━━━━━━━━━━━━\n"
@@ -142,7 +167,7 @@ def analyze_token(data):
                "📝 "+desc_short+"\n"
                "━━━━━━━━━━━━━━\n"
                "💰 Dev Buy: "+sol_display+" SOL\n"
-               "📊 Market Cap: "+mcap_display+" SOL\n"
+               "📊 Market Cap: <b>"+mcap_usd+"</b> ("+mcap_sol+" SOL)\n"
                "🔗 pump.fun/"+mint+"\n"
                "━━━━━━━━━━━━━━\n"
                "📈 Win Rate: "+get_winrate()+"\n"
