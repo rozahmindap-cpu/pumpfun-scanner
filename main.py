@@ -7,7 +7,6 @@ app = Flask(__name__)
 BOT_TOKEN = "8546209847:AAFb6fa0yJBa5iQNWvE32p-rA8nwcrFlGfY"
 CHAT_ID = "1603606771"
 WS_URL = "wss://pumpportal.fun/api/data"
-MIN_SAFE_SCORE = 60
 
 def send_tele(msg):
     try:
@@ -19,65 +18,76 @@ def send_tele(msg):
     except:
         pass
 
-def calc_rug_score(data):
-    score = 0
-    if not data.get("twitter"):
-        score += 20
-    if not data.get("telegram"):
-        score += 15
-    if not data.get("website"):
-        score += 10
-    desc = str(data.get("description", ""))
-    if not desc or len(desc) < 10:
-        score += 15
-    sol_amount = data.get("solAmount", 0)
-    if isinstance(sol_amount, (int, float)):
-        sol = sol_amount / 1e9 if sol_amount > 1000 else sol_amount
-        if sol > 10:
-            score += 30
-        elif sol > 5:
-            score += 20
-        elif sol > 2:
-            score += 10
-    return min(score, 100)
+def fetch_metadata(uri):
+    try:
+        if not uri:
+            return {}
+        r = requests.get(uri, timeout=5)
+        return r.json()
+    except:
+        return {}
 
 def analyze_token(data):
     try:
-        rug_score = calc_rug_score(data)
-        safe_score = 100 - rug_score
-        if safe_score < MIN_SAFE_SCORE:
-            return
         name = data.get("name", "Unknown")
         symbol = data.get("symbol", "???")
         mint = data.get("mint", "")
-        desc = data.get("description", "")
-        desc_short = desc[:100] if desc else "-"
-        has_twitter = "✅" if data.get("twitter") else "❌"
-        has_telegram = "✅" if data.get("telegram") else "❌"
-        has_website = "✅" if data.get("website") else "❌"
+        uri = data.get("uri", "")
+
+        # Fetch metadata for social links & description
+        meta = fetch_metadata(uri)
+        twitter = meta.get("twitter") or data.get("twitter") or ""
+        telegram = meta.get("telegram") or data.get("telegram") or ""
+        website = meta.get("website") or data.get("website") or ""
+        description = meta.get("description") or data.get("description") or ""
+
+        # Dev buy in SOL
         sol_amount = data.get("solAmount", 0)
         if isinstance(sol_amount, (int, float)):
             sol = sol_amount / 1e9 if sol_amount > 1000 else sol_amount
-            sol_display = str(round(sol, 3))
         else:
-            sol_display = "?"
-        if safe_score >= 80:
+            sol = 0
+
+        # Rug score calculation
+        rug_score = 0
+        if not twitter: rug_score += 15
+        if not telegram: rug_score += 10
+        if not website: rug_score += 5
+        if not description or len(description) < 10: rug_score += 10
+        if sol > 10: rug_score += 40
+        elif sol > 5: rug_score += 25
+        elif sol > 2: rug_score += 15
+        elif sol > 0.5: rug_score += 5
+        rug_score = min(rug_score, 100)
+        safe_score = 100 - rug_score
+
+        # Risk label
+        if safe_score >= 70:
             risk_emoji = "🟢"
             risk_label = "LOW RISK"
-        else:
+        elif safe_score >= 50:
             risk_emoji = "🟡"
             risk_label = "MEDIUM RISK"
+        else:
+            risk_emoji = "🔴"
+            risk_label = "HIGH RISK"
+
+        has_twitter = "✅ "+twitter if twitter else "❌"
+        has_telegram = "✅ "+telegram if telegram else "❌"
+        has_website = "✅ "+website if website else "❌"
+        desc_short = description[:80]+"..." if len(description) > 80 else (description or "-")
+        sol_display = str(round(sol, 4)) if sol > 0 else "0"
+
         msg = ("🚀 <b>NEW TOKEN DETECTED!</b>\n"
                "━━━━━━━━━━━━━━\n"
-               "📌 Name: <b>"+name+"</b>\n"
-               "💎 Symbol: <b>$"+symbol+"</b>\n"
+               "📌 <b>"+name+"</b> ($"+symbol+")\n"
                "━━━━━━━━━━━━━━\n"
-               +risk_emoji+" <b>Safe Score: "+str(safe_score)+"/100</b> ("+risk_label+")\n"
+               +risk_emoji+" <b>Safe Score: "+str(safe_score)+"/100</b> — "+risk_label+"\n"
                "━━━━━━━━━━━━━━\n"
                "🐦 Twitter: "+has_twitter+"\n"
                "💬 Telegram: "+has_telegram+"\n"
                "🌐 Website: "+has_website+"\n"
-               "📝 Desc: "+desc_short+"\n"
+               "📝 "+desc_short+"\n"
                "━━━━━━━━━━━━━━\n"
                "💰 Dev Buy: "+sol_display+" SOL\n"
                "🔗 pump.fun/"+mint)
@@ -94,9 +104,9 @@ def on_message(ws, message):
         pass
 
 def on_open(ws):
-    print("WS connected")
+    print("WS connected, subscribing...")
     ws.send(json.dumps({"method": "subscribeNewToken"}))
-    send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\nMonitoring token baru di pump.fun real-time...")
+    send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\nMonitoring semua token baru di pump.fun real-time...")
 
 def on_error(ws, error):
     print("WS error:", str(error))
