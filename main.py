@@ -8,6 +8,9 @@ BOT_TOKEN = "8546209847:AAFb6fa0yJBa5iQNWvE32p-rA8nwcrFlGfY"
 CHAT_ID = "1603606771"
 WS_URL = "wss://pumpportal.fun/api/data"
 
+stats = {"win": 0, "loss": 0}
+monitored_tokens = {}  # mint -> {"initial_mcap": x, "deadline": t, "name": n, "symbol": s}
+
 def send_tele(msg):
     try:
         requests.post(
@@ -18,6 +21,13 @@ def send_tele(msg):
     except:
         pass
 
+def get_winrate():
+    total = stats["win"] + stats["loss"]
+    if total == 0:
+        return "N/A"
+    pct = round(stats["win"] / total * 100, 1)
+    return str(pct)+"% ("+str(stats["win"])+"W/"+str(stats["loss"])+"L)"
+
 def fetch_metadata(uri):
     try:
         if not uri:
@@ -27,28 +37,70 @@ def fetch_metadata(uri):
     except:
         return {}
 
+def monitor_token_price(mint, initial_mcap, name, symbol):
+    deadline = time.time() + 1800  # 30 minutes
+    ws_monitor = None
+
+    def on_msg(ws, message):
+        nonlocal deadline
+        try:
+            data = json.loads(message)
+            mcap = data.get("marketCapSol", 0)
+            if mcap <= 0:
+                return
+            if mcap >= initial_mcap * 2:
+                stats["win"] += 1
+                send_tele("✅ <b>PUMP! 2x HIT!</b>\n"
+                          "Token: <b>"+name+"</b> ($"+symbol+")\n"
+                          "MC Awal: "+str(round(initial_mcap,2))+" SOL\n"
+                          "MC Sekarang: "+str(round(mcap,2))+" SOL\n\n"
+                          "📊 Win Rate: "+get_winrate())
+                ws.close()
+            elif mcap <= initial_mcap * 0.5:
+                stats["loss"] += 1
+                send_tele("❌ <b>DUMP! -50% HIT!</b>\n"
+                          "Token: <b>"+name+"</b> ($"+symbol+")\n"
+                          "MC Awal: "+str(round(initial_mcap,2))+" SOL\n"
+                          "MC Sekarang: "+str(round(mcap,2))+" SOL\n\n"
+                          "📊 Win Rate: "+get_winrate())
+                ws.close()
+            elif time.time() > deadline:
+                ws.close()
+        except:
+            pass
+
+    def on_open_monitor(ws):
+        ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [mint]}))
+
+    def run():
+        try:
+            ws = websocket.WebSocketApp(WS_URL, on_message=on_msg, on_open=on_open_monitor)
+            ws.run_forever()
+        except:
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+
 def analyze_token(data):
     try:
         name = data.get("name", "Unknown")
         symbol = data.get("symbol", "???")
         mint = data.get("mint", "")
         uri = data.get("uri", "")
+        initial_mcap = data.get("marketCapSol", 0)
 
-        # Fetch metadata for social links & description
         meta = fetch_metadata(uri)
         twitter = meta.get("twitter") or data.get("twitter") or ""
         telegram = meta.get("telegram") or data.get("telegram") or ""
         website = meta.get("website") or data.get("website") or ""
         description = meta.get("description") or data.get("description") or ""
 
-        # Dev buy in SOL
         sol_amount = data.get("solAmount", 0)
         if isinstance(sol_amount, (int, float)):
             sol = sol_amount / 1e9 if sol_amount > 1000 else sol_amount
         else:
             sol = 0
 
-        # Rug score calculation
         rug_score = 0
         if not twitter: rug_score += 15
         if not telegram: rug_score += 10
@@ -61,7 +113,6 @@ def analyze_token(data):
         rug_score = min(rug_score, 100)
         safe_score = 100 - rug_score
 
-        # Risk label
         if safe_score >= 70:
             risk_emoji = "🟢"
             risk_label = "LOW RISK"
@@ -77,6 +128,7 @@ def analyze_token(data):
         has_website = "✅ "+website if website else "❌"
         desc_short = description[:80]+"..." if len(description) > 80 else (description or "-")
         sol_display = str(round(sol, 4)) if sol > 0 else "0"
+        mcap_display = str(round(initial_mcap, 2)) if initial_mcap else "?"
 
         msg = ("🚀 <b>NEW TOKEN DETECTED!</b>\n"
                "━━━━━━━━━━━━━━\n"
@@ -90,8 +142,16 @@ def analyze_token(data):
                "📝 "+desc_short+"\n"
                "━━━━━━━━━━━━━━\n"
                "💰 Dev Buy: "+sol_display+" SOL\n"
-               "🔗 pump.fun/"+mint)
+               "📊 Market Cap: "+mcap_display+" SOL\n"
+               "🔗 pump.fun/"+mint+"\n"
+               "━━━━━━━━━━━━━━\n"
+               "📈 Win Rate: "+get_winrate()+"\n"
+               "⏱ Monitoring 30 menit...")
         send_tele(msg)
+
+        if mint and initial_mcap > 0:
+            threading.Thread(target=monitor_token_price, args=(mint, initial_mcap, name, symbol), daemon=True).start()
+
     except Exception as e:
         print("analyze error:", str(e))
 
@@ -106,7 +166,7 @@ def on_message(ws, message):
 def on_open(ws):
     print("WS connected, subscribing...")
     ws.send(json.dumps({"method": "subscribeNewToken"}))
-    send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\nMonitoring semua token baru di pump.fun real-time...")
+    send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\nMonitoring semua token baru di pump.fun...\n✅ Win/Loss tracking aktif (TP: 2x | SL: -50%)")
 
 def on_error(ws, error):
     print("WS error:", str(error))
@@ -133,4 +193,6 @@ threading.Thread(target=run_scanner, daemon=True).start()
 
 @app.route("/")
 def home():
-    return "PumpFun Scanner Running! 🚀", 200
+    wr = get_winrate()
+    total = stats["win"] + stats["loss"]
+    return "PumpFun Scanner | Signals: "+str(total)+" | Win Rate: "+wr, 200
