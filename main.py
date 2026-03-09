@@ -10,9 +10,11 @@ WS_URL = "wss://pumpportal.fun/api/data"
 
 stats = {"win": 0, "loss": 0}
 sol_price_usd = {"price": 130.0, "updated": 0}
+whale_alerted = {}  # mint -> set of tx signatures already alerted
 
 MC_MIN_USD = 30_000
 MC_MAX_USD = 500_000
+WHALE_MIN_SOL = 2.0  # alert if single buy >= this
 
 def get_sol_price():
     now = time.time()
@@ -68,11 +70,34 @@ def fetch_metadata(uri):
 
 def monitor_token_price(mint, initial_mcap, name, symbol):
     deadline = time.time() + 1800
+    whale_alerted[mint] = set()
 
     def on_msg(ws, message):
         try:
             data = json.loads(message)
             mcap = data.get("marketCapSol", 0)
+            tx_type = data.get("txType", "")
+            sig = data.get("signature", "")
+
+            # Whale buy detection
+            if tx_type == "buy":
+                sol_amt = data.get("solAmount", 0)
+                if isinstance(sol_amt, (int, float)):
+                    sol = sol_amt / 1e9 if sol_amt > 1000 else sol_amt
+                    if sol >= WHALE_MIN_SOL and sig not in whale_alerted.get(mint, set()):
+                        whale_alerted[mint].add(sig)
+                        wallet = data.get("traderPublicKey", "???")
+                        wallet_short = wallet[:6]+"..."+wallet[-4:] if len(wallet) > 10 else wallet
+                        current_mcap = fmt_usd(mcap) if mcap else "?"
+                        send_tele("🐋 <b>WHALE BUY DETECTED!</b>\n"
+                                  "Token: <b>"+name+"</b> ($"+symbol+")\n"
+                                  "━━━━━━━━━━━━━━\n"
+                                  "💰 Buy: <b>"+str(round(sol, 2))+" SOL</b> ("+fmt_usd(sol)+")\n"
+                                  "📊 MC Sekarang: "+current_mcap+"\n"
+                                  "👛 Wallet: "+wallet_short+"\n"
+                                  "🔗 pump.fun/"+mint)
+
+            # TP/SL monitoring
             if mcap <= 0:
                 return
             if mcap >= initial_mcap * 2:
@@ -116,7 +141,6 @@ def analyze_token(data):
         uri = data.get("uri", "")
         initial_mcap = data.get("marketCapSol", 0)
 
-        # Filter by market cap in USD
         sol_p = get_sol_price()
         mcap_usd_val = initial_mcap * sol_p
         if mcap_usd_val < MC_MIN_USD or mcap_usd_val > MC_MAX_USD:
@@ -180,6 +204,7 @@ def analyze_token(data):
                "🔗 pump.fun/"+mint+"\n"
                "━━━━━━━━━━━━━━\n"
                "📈 Win Rate: "+get_winrate()+"\n"
+               "🐋 Whale alert aktif (≥"+str(WHALE_MIN_SOL)+" SOL)\n"
                "⏱ Monitoring 30 menit...")
         send_tele(msg)
 
@@ -202,7 +227,8 @@ def on_open(ws):
     ws.send(json.dumps({"method": "subscribeNewToken"}))
     send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\n"
               "Filter MC: <b>$30K - $500K</b>\n"
-              "✅ Win/Loss tracking aktif (TP: 2x | SL: -50%)")
+              "🐋 Whale alert: buy ≥ 2 SOL\n"
+              "✅ Win/Loss tracking (TP: 2x | SL: -50%)")
 
 def on_error(ws, error):
     print("WS error:", str(error))
