@@ -11,6 +11,9 @@ WS_URL = "wss://pumpportal.fun/api/data"
 stats = {"win": 0, "loss": 0}
 sol_price_usd = {"price": 130.0, "updated": 0}
 
+MC_MIN_USD = 30_000
+MC_MAX_USD = 500_000
+
 def get_sol_price():
     now = time.time()
     if now - sol_price_usd["updated"] < 60:
@@ -113,6 +116,12 @@ def analyze_token(data):
         uri = data.get("uri", "")
         initial_mcap = data.get("marketCapSol", 0)
 
+        # Filter by market cap in USD
+        sol_p = get_sol_price()
+        mcap_usd_val = initial_mcap * sol_p
+        if mcap_usd_val < MC_MIN_USD or mcap_usd_val > MC_MAX_USD:
+            return
+
         meta = fetch_metadata(uri)
         twitter = meta.get("twitter") or data.get("twitter") or ""
         telegram = meta.get("telegram") or data.get("telegram") or ""
@@ -152,7 +161,7 @@ def analyze_token(data):
         has_website = "✅ "+website if website else "❌"
         desc_short = description[:80]+"..." if len(description) > 80 else (description or "-")
         sol_display = str(round(sol, 4)) if sol > 0 else "0"
-        mcap_usd = fmt_usd(initial_mcap) if initial_mcap else "?"
+        mcap_usd = fmt_usd(initial_mcap)
         mcap_sol = str(round(initial_mcap, 2)) if initial_mcap else "?"
 
         msg = ("🚀 <b>NEW TOKEN DETECTED!</b>\n"
@@ -191,7 +200,9 @@ def on_message(ws, message):
 def on_open(ws):
     print("WS connected, subscribing...")
     ws.send(json.dumps({"method": "subscribeNewToken"}))
-    send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\nMonitoring semua token baru di pump.fun...\n✅ Win/Loss tracking aktif (TP: 2x | SL: -50%)")
+    send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\n"
+              "Filter MC: <b>$30K - $500K</b>\n"
+              "✅ Win/Loss tracking aktif (TP: 2x | SL: -50%)")
 
 def on_error(ws, error):
     print("WS error:", str(error))
@@ -220,4 +231,4 @@ threading.Thread(target=run_scanner, daemon=True).start()
 def home():
     wr = get_winrate()
     total = stats["win"] + stats["loss"]
-    return "PumpFun Scanner | Signals: "+str(total)+" | Win Rate: "+wr, 200
+    return "PumpFun Scanner | MC: $30K-$500K | Signals: "+str(total)+" | Win Rate: "+wr, 200
