@@ -242,13 +242,25 @@ def watch_token(data):
     except Exception as e:
         print("watch error:", str(e))
 
+token_count = {"n": 0}
+
 def on_message(ws, message):
     try:
         data = json.loads(message)
         if data.get("txType") == "create":
+            token_count["n"] += 1
+            mcap = data.get("marketCapSol", 0)
+            sol_p = get_sol_price()
+            mcap_usd = mcap * sol_p
+            # Debug: log first 3 tokens received
+            if token_count["n"] <= 3:
+                send_tele("🔍 <b>Debug Token #"+str(token_count["n"])+"</b>\n"
+                          "Name: "+str(data.get("name","?"))+"\n"
+                          "MC: "+fmt_usd(mcap)+" ("+str(round(mcap,2))+" SOL)\n"
+                          "Mint: "+str(data.get("mint","?"))[:20]+"...")
             threading.Thread(target=watch_token, args=(data,), daemon=True).start()
-    except:
-        pass
+    except Exception as e:
+        print("on_message error:", str(e))
 
 def on_open(ws):
     print("WS connected")
