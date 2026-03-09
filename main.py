@@ -7,14 +7,15 @@ app = Flask(__name__)
 BOT_TOKEN = "8546209847:AAFb6fa0yJBa5iQNWvE32p-rA8nwcrFlGfY"
 CHAT_ID = "1603606771"
 WS_URL = "wss://pumpportal.fun/api/data"
+SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 
 stats = {"win": 0, "loss": 0}
 sol_price_usd = {"price": 130.0, "updated": 0}
 
-MC_ALERT_USD = 10_000   # Alert when MC hits this
-MC_MAX_USD = 200_000    # Ignore if already too high
+MC_ALERT_USD = 10_000
+MC_MAX_USD = 200_000
 WHALE_MIN_SOL = 2.0
-MONITOR_WAIT_MIN = 10   # Minutes to wait for MC to reach target before giving up
+MONITOR_WAIT_MIN = 10
 
 def get_sol_price():
     now = time.time()
@@ -68,6 +69,35 @@ def fetch_metadata(uri):
     except:
         return {}
 
+def fetch_coin_data(mint):
+    try:
+        r = requests.get("https://frontend-api.pump.fun/coins/"+mint, timeout=5)
+        return r.json()
+    except:
+        return {}
+
+def get_top_holder_pct(mint):
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenLargestAccounts",
+            "params": [mint]
+        }
+        r = requests.post(SOLANA_RPC, json=payload, timeout=8)
+        result = r.json().get("result", {}).get("value", [])
+        if not result:
+            return None, None
+        amounts = [float(x.get("uiAmount", 0)) for x in result]
+        total = sum(amounts)
+        if total == 0:
+            return None, None
+        top1_pct = round(amounts[0] / total * 100, 1)
+        top5_pct = round(sum(amounts[:5]) / total * 100, 1)
+        return top1_pct, top5_pct
+    except:
+        return None, None
+
 def watch_token(data):
     try:
         name = data.get("name", "Unknown")
@@ -92,70 +122,77 @@ def watch_token(data):
 
                 if mcap <= 0:
                     return
-
-                # Skip if already too high
                 if mcap > mc_max_sol:
                     ws.close()
                     return
-
-                # Timeout — no movement
                 if time.time() > deadline and not alerted["sent"]:
                     ws.close()
                     return
 
-                # First alert when MC hits $10K
                 if not alerted["sent"] and mcap >= mc_alert_sol:
                     alerted["sent"] = True
                     alerted["entry_mcap"] = mcap
 
                     meta = fetch_metadata(uri)
-                    twitter = meta.get("twitter") or ""
-                    telegram = meta.get("telegram") or ""
-                    website = meta.get("website") or ""
-                    description = meta.get("description") or ""
+                    coin = fetch_coin_data(mint)
+                    top1_pct, top5_pct = get_top_holder_pct(mint)
+
+                    twitter = meta.get("twitter") or coin.get("twitter") or ""
+                    telegram = meta.get("telegram") or coin.get("telegram") or ""
+                    website = meta.get("website") or coin.get("website") or ""
+                    description = meta.get("description") or coin.get("description") or ""
+                    holder_count = coin.get("holder_count") or coin.get("holders") or "?"
 
                     rug_score = 0
                     if not twitter: rug_score += 15
                     if not telegram: rug_score += 10
                     if not website: rug_score += 5
                     if not description or len(description) < 10: rug_score += 10
+                    if top1_pct and top1_pct > 50: rug_score += 30
+                    elif top1_pct and top1_pct > 30: rug_score += 15
+                    elif top1_pct and top1_pct > 20: rug_score += 8
                     rug_score = min(rug_score, 100)
                     safe_score = 100 - rug_score
 
                     if safe_score >= 70:
-                        risk_emoji = "🟢"
+                        risk_emoji = "ðŸŸ¢"
                         risk_label = "LOW RISK"
                     elif safe_score >= 50:
-                        risk_emoji = "🟡"
+                        risk_emoji = "ðŸŸ¡"
                         risk_label = "MEDIUM RISK"
                     else:
-                        risk_emoji = "🔴"
+                        risk_emoji = "ðŸ”´"
                         risk_label = "HIGH RISK"
 
-                    has_twitter = "✅ "+twitter if twitter else "❌"
-                    has_telegram = "✅ "+telegram if telegram else "❌"
-                    has_website = "✅ "+website if website else "❌"
+                    has_twitter = "âœ…" if twitter else "âŒ"
+                    has_telegram = "âœ…" if telegram else "âŒ"
+                    has_website = "âœ…" if website else "âŒ"
                     desc_short = description[:80]+"..." if len(description) > 80 else (description or "-")
 
-                    send_tele("🚀 <b>TOKEN AKTIF! MC "+fmt_usd(mcap)+"</b>\n"
-                              "━━━━━━━━━━━━━━\n"
-                              "📌 <b>"+name+"</b> ($"+symbol+")\n"
-                              "━━━━━━━━━━━━━━\n"
-                              +risk_emoji+" <b>Safe Score: "+str(safe_score)+"/100</b> — "+risk_label+"\n"
-                              "━━━━━━━━━━━━━━\n"
-                              "🐦 Twitter: "+has_twitter+"\n"
-                              "💬 Telegram: "+has_telegram+"\n"
-                              "🌐 Website: "+has_website+"\n"
-                              "📝 "+desc_short+"\n"
-                              "━━━━━━━━━━━━━━\n"
-                              "📊 Market Cap: <b>"+fmt_usd(mcap)+"</b>\n"
-                              "🔗 pump.fun/"+mint+"\n"
-                              "━━━━━━━━━━━━━━\n"
-                              "📈 Win Rate: "+get_winrate()+"\n"
-                              "🐋 Whale alert aktif (≥"+str(WHALE_MIN_SOL)+" SOL)\n"
-                              "⏱ Monitoring TP 2x / SL -50%...")
+                    top1_str = str(top1_pct)+"%" if top1_pct else "?"
+                    top5_str = str(top5_pct)+"%" if top5_pct else "?"
+                    top1_warn = " âš ï¸" if top1_pct and top1_pct > 20 else " âœ…"
+                    top5_warn = " âš ï¸" if top5_pct and top5_pct > 50 else " âœ…"
 
-                # Whale detection (after alert sent)
+                    send_tele("ðŸš€ <b>TOKEN AKTIF!</b>\n"
+                              "â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                              "ðŸ“Œ <b>"+name+"</b> ($"+symbol+")\n"
+                              "â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                              +risk_emoji+" <b>Safe Score: "+str(safe_score)+"/100</b> â€” "+risk_label+"\n"
+                              "â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                              "ðŸ¦ Twitter: "+has_twitter+" | ðŸ’¬ TG: "+has_telegram+" | ðŸŒ Web: "+has_website+"\n"
+                              "ðŸ“ "+desc_short+"\n"
+                              "â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                              "ðŸ‘¥ Holders: <b>"+str(holder_count)+"</b>\n"
+                              "ðŸ† Top 1 holder: <b>"+top1_str+"</b>"+top1_warn+"\n"
+                              "ðŸ… Top 5 holders: <b>"+top5_str+"</b>"+top5_warn+"\n"
+                              "â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                              "ðŸ“Š Market Cap: <b>"+fmt_usd(mcap)+"</b>\n"
+                              "ðŸ”— pump.fun/"+mint+"\n"
+                              "â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                              "ðŸ“ˆ Win Rate: "+get_winrate()+"\n"
+                              "ðŸ‹ Whale alert aktif (>="+str(WHALE_MIN_SOL)+" SOL)")
+
                 if alerted["sent"] and tx_type == "buy" and sig not in whale_sigs:
                     sol_amt = data_trade.get("solAmount", 0)
                     if isinstance(sol_amt, (int, float)):
@@ -164,33 +201,29 @@ def watch_token(data):
                             whale_sigs.add(sig)
                             wallet = data_trade.get("traderPublicKey", "???")
                             wallet_short = wallet[:6]+"..."+wallet[-4:] if len(wallet) > 10 else wallet
-                            send_tele("🐋 <b>WHALE BUY!</b>\n"
+                            send_tele("ðŸ‹ <b>WHALE BUY!</b>\n"
                                       "Token: <b>"+name+"</b> ($"+symbol+")\n"
-                                      "💰 Buy: <b>"+str(round(sol, 2))+" SOL</b> ("+fmt_usd(sol)+")\n"
-                                      "📊 MC: "+fmt_usd(mcap)+"\n"
-                                      "👛 "+wallet_short+"\n"
-                                      "🔗 pump.fun/"+mint)
+                                      "ðŸ’° Buy: <b>"+str(round(sol, 2))+" SOL</b> ("+fmt_usd(sol)+")\n"
+                                      "ðŸ“Š MC: "+fmt_usd(mcap)+"\n"
+                                      "ðŸ‘› "+wallet_short+"\n"
+                                      "ðŸ”— pump.fun/"+mint)
 
-                # TP/SL after alert
                 if alerted["sent"]:
                     entry = alerted.get("entry_mcap", mcap)
                     if mcap >= entry * 2:
                         stats["win"] += 1
-                        send_tele("✅ <b>PUMP! 2x HIT!</b>\n"
+                        send_tele("âœ… <b>PUMP! 2x HIT!</b>\n"
                                   "Token: <b>"+name+"</b> ($"+symbol+")\n"
-                                  "MC Entry: "+fmt_usd(entry)+"\n"
-                                  "MC Sekarang: "+fmt_usd(mcap)+"\n\n"
-                                  "📊 Win Rate: "+get_winrate())
+                                  "MC Entry: "+fmt_usd(entry)+" -> "+fmt_usd(mcap)+"\n\n"
+                                  "ðŸ“Š Win Rate: "+get_winrate())
                         ws.close()
                     elif mcap <= entry * 0.5:
                         stats["loss"] += 1
-                        send_tele("❌ <b>DUMP! -50% HIT!</b>\n"
+                        send_tele("âŒ <b>DUMP! -50% HIT!</b>\n"
                                   "Token: <b>"+name+"</b> ($"+symbol+")\n"
-                                  "MC Entry: "+fmt_usd(entry)+"\n"
-                                  "MC Sekarang: "+fmt_usd(mcap)+"\n\n"
-                                  "📊 Win Rate: "+get_winrate())
+                                  "MC Entry: "+fmt_usd(entry)+" -> "+fmt_usd(mcap)+"\n\n"
+                                  "ðŸ“Š Win Rate: "+get_winrate())
                         ws.close()
-
             except:
                 pass
 
@@ -220,11 +253,10 @@ def on_message(ws, message):
 def on_open(ws):
     print("WS connected")
     ws.send(json.dumps({"method": "subscribeNewToken"}))
-    send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\n"
-              "Alert saat MC nyentuh: <b>$10K+</b>\n"
-              "Max MC: <b>$200K</b>\n"
-              "🐋 Whale alert: ≥ 2 SOL\n"
-              "✅ TP: 2x | SL: -50%")
+    send_tele("ðŸŸ¢ <b>PumpFun Scanner AKTIF!</b>\n"
+              "Alert saat MC: <b>$10K+</b> | Max: <b>$200K</b>\n"
+              "ðŸ‘¥ Holder count + top holder % aktif\n"
+              "ðŸ‹ Whale alert >= 2 SOL | TP: 2x | SL: -50%")
 
 def on_error(ws, error):
     print("WS error:", str(error))
@@ -247,4 +279,4 @@ threading.Thread(target=run_scanner, daemon=True).start()
 def home():
     wr = get_winrate()
     total = stats["win"] + stats["loss"]
-    return "PumpFun Scanner | Alert at $10K+ | Signals: "+str(total)+" | Win Rate: "+wr, 200
+    return "PumpFun Scanner | Alert $10K+ | Signals: "+str(total)+" | Win Rate: "+wr, 200
