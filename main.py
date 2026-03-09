@@ -12,8 +12,8 @@ stats = {"win": 0, "loss": 0}
 sol_price_usd = {"price": 130.0, "updated": 0}
 whale_alerted = {}  # mint -> set of tx signatures already alerted
 
-MC_MIN_USD = 30_000
-MC_MAX_USD = 500_000
+MC_MIN_USD = 3_000
+MC_MAX_USD = 200_000
 WHALE_MIN_SOL = 2.0  # alert if single buy >= this
 
 def get_sol_price():
@@ -226,7 +226,7 @@ def on_open(ws):
     print("WS connected, subscribing...")
     ws.send(json.dumps({"method": "subscribeNewToken"}))
     send_tele("🟢 <b>PumpFun Scanner AKTIF!</b>\n"
-              "Filter MC: <b>$30K - $500K</b>\n"
+              "Filter MC: <b>$3K - $200K</b>\n"
               "🐋 Whale alert: buy ≥ 2 SOL\n"
               "✅ Win/Loss tracking (TP: 2x | SL: -50%)")
 
@@ -257,4 +257,4 @@ threading.Thread(target=run_scanner, daemon=True).start()
 def home():
     wr = get_winrate()
     total = stats["win"] + stats["loss"]
-    return "PumpFun Scanner | MC: $30K-$500K | Signals: "+str(total)+" | Win Rate: "+wr, 200
+    return "PumpFun Scanner | MC: $3K-$200K | Signals: "+str(total)+" | Win Rate: "+wr, 200
