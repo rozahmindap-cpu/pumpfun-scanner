@@ -16,7 +16,7 @@ MC_ALERT_USD = 5_000
 MC_MAX_USD = 200_000
 WHALE_MIN_SOL = 2.0
 WHALE_MAX_ALERTS = 3
-MONITOR_WAIT_MIN = 10
+MONITOR_WAIT_MIN = 30
 
 def get_sol_price():
     now = time.time()
@@ -247,6 +247,7 @@ def watch_token(data):
                 pass
 
         def on_open_w(ws):
+            print("Monitoring: " + name + " ($" + symbol + ") mint=" + mint[:8])
             ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [mint]}))
 
         def run():
