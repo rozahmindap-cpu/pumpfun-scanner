@@ -10,25 +10,32 @@ WS_URL = "wss://pumpportal.fun/api/data"
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 
 stats = {"win": 0, "loss": 0}
-sol_price_usd = {"price": 130.0, "updated": 0}
+sol_price_usd = {"price": 85.0, "updated": 0}
 
-MC_ALERT_USD = 10_000
+MC_ALERT_USD = 5_000
 MC_MAX_USD = 200_000
 WHALE_MIN_SOL = 2.0
 MONITOR_WAIT_MIN = 10
 
 def get_sol_price():
     now = time.time()
-    if now - sol_price_usd["updated"] < 60:
+    if now - sol_price_usd["updated"] < 30:
         return sol_price_usd["price"]
     try:
-        r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", timeout=5)
-        price = r.json()["solana"]["usd"]
+        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", timeout=5)
+        price = float(r.json()["price"])
         sol_price_usd["price"] = price
         sol_price_usd["updated"] = now
         return price
     except:
-        return sol_price_usd["price"]
+        try:
+            r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", timeout=5)
+            price = r.json()["solana"]["usd"]
+            sol_price_usd["price"] = price
+            sol_price_usd["updated"] = now
+            return price
+        except:
+            return sol_price_usd["price"]
 
 def fmt_usd(sol_amount):
     try:
@@ -266,7 +273,7 @@ def on_open(ws):
     print("WS connected")
     ws.send(json.dumps({"method": "subscribeNewToken"}))
     send_tele("ðŸŸ¢ <b>PumpFun Scanner AKTIF!</b>\n"
-              "Alert saat MC: <b>$10K+</b> | Max: <b>$200K</b>\n"
+              "Alert saat MC: <b>$5K+</b> | Max: <b>$200K</b>\n"
               "ðŸ‘¥ Holder count + top holder % aktif\n"
               "ðŸ‹ Whale alert >= 2 SOL | TP: 2x | SL: -50%")
 
